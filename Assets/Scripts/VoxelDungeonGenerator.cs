@@ -9,115 +9,117 @@ public class VoxelDungeonGenerator : MonoBehaviour
     public class Config
     {
         [Header("Seed and Grid")]
-        public int seed = 0;
-        public int sizeX = 30;
-        public int sizeY = 10;
-        public int sizeZ = 30;
-        [Min(0.1f)] public float cellSize = 1f;
+        public int seed = 0;                                // Procedural seed; 0 selects a new random seed each generation.
+        public int sizeX = 30;                              // Grid size along the X axis, in cells.
+        public int sizeY = 10;                              // Grid size along the Y axis (layers), in cells.
+        public int sizeZ = 30;                              // Grid size along the Z axis, in cells.
+        [Min(0.1f)] public float cellSize = 1f;            // World units represented by a single grid cell.
 
         [Header("Rooms")]
-        public int roomCount = 10;
-        public Vector2Int roomSizeRangeXZ = new Vector2Int(3, 8); // inclusive
-        public int minRoomY = 1;
-        public int maxRoomY = 4;
-        public int maxPlacementTries = 1000;
-        public int roomGap = 1; // keep this many empty cells between rooms
+        public int roomCount = 10;                          // Target number of rooms to attempt to place.
+        public Vector2Int roomSizeRangeXZ = new Vector2Int(3, 8); // Inclusive width/depth range (cells) used for random room dimensions.
+        public int minRoomY = 1;                            // Minimum room height (cells), inclusive.
+        public int maxRoomY = 4;                            // Maximum room height (cells), inclusive.
+        public int maxPlacementTries = 1000;                // Upper bound on random placement attempts before stopping.
+        public int roomGap = 1;                             // Empty-cell buffer maintained around each room to prevent touching.
 
         [Header("Graph")]
         [Tooltip("How many nearest neighbors to consider when building the room graph.")]
-        [Range(1, 8)] public int nearest = 3;
+        [Range(1, 8)] public int nearest = 3;               // K-nearest value for candidate edges between rooms.
         [Tooltip("Chance to add an extra non-MST edge to create loops.")]
-        [Range(0f, 1f)] public float extraEdgeChance = 0.15f;
+        [Range(0f, 1f)] public float extraEdgeChance = 0.15f; // Probability of adding additional edges beyond the spanning tree.
 
         [Header("Prefabs/Materials")]
-        public GameObject roomPrefab;
-        public GameObject corridorPrefab;
-        public Material startMat;
-        public Material endMat;
-        public Material entranceMat; // color for doorway tiles on rooms
-        public Material corridorMat;
+        public GameObject roomPrefab;                       // Prefab spawned per room cell.
+        public GameObject corridorPrefab;                   // Prefab spawned per corridor cell.
+        public Material startMat;                           // Material applied to the start room’s cells.
+        public Material endMat;                             // Material applied to the end room’s cells.
+        public Material entranceMat;                        // Material applied to single doorway cells on rooms.
+        public Material corridorMat;                        // Material applied to corridor instances.
 
         [Header("Bounds Overlay (Game View)")]
-        public bool drawBounds = true;
-        public Color boundsColor = new Color(0f, 1f, 0f, 0.5f);
-        public float boundsLineWidth = 0.02f;
+        public bool drawBounds = true;                      // Enables a runtime wireframe showing the generator’s total bounds.
+        public Color boundsColor = new Color(0f, 1f, 0f, 0.5f); // Color/alpha used by the bounds wire.
+        public float boundsLineWidth = 0.02f;               // LineRenderer width for the bounds wire.
     }
 
-    public Config config = new Config();
+    public Config config = new Config();                    // Authoring configuration exposed in the inspector.
 
     // Hotkeys
     [Header("Hotkeys")]
-    public KeyCode regenerateKey = KeyCode.G;
-    public KeyCode selectAxisXKey = KeyCode.Z;
-    public KeyCode selectAxisYKey = KeyCode.X;
-    public KeyCode selectAxisZKey = KeyCode.C;
-    public KeyCode sizeIncreaseKey = KeyCode.UpArrow;
-    public KeyCode sizeDecreaseKey = KeyCode.DownArrow;
-    public int sizeStep = 10;
+    public KeyCode regenerateKey = KeyCode.G;               // Triggers a full regeneration.
+    public KeyCode selectAxisXKey = KeyCode.Z;              // Selects X for size adjustment.
+    public KeyCode selectAxisYKey = KeyCode.X;              // Selects Y for size adjustment.
+    public KeyCode selectAxisZKey = KeyCode.C;              // Selects Z for size adjustment.
+    public KeyCode sizeIncreaseKey = KeyCode.UpArrow;       // Increases the selected dimension.
+    public KeyCode sizeDecreaseKey = KeyCode.DownArrow;     // Decreases the selected dimension.
+    public int sizeStep = 10;                               // Magnitude of each size adjustment step (cells).
 
-    enum Axis { X, Y, Z }
-    Axis selectedAxis = Axis.X;
+    enum Axis { X, Y, Z }                                   // Axis selector for interactive resizing.
+    Axis selectedAxis = Axis.X;                             // Currently selected axis for resizing.
 
-    // Internal
-    System.Random rng;
-    bool[,,] grid;                  // true = room or corridor is placed here
-    bool[,,] isRoom;               // true = cell belongs to a room
-    HashSet<Vector3Int> doors = new HashSet<Vector3Int>(); // the one door per room
-    List<Room> rooms = new List<Room>();
+    // Internal state
+    System.Random rng;                                      // Deterministic RNG derived from the seed.
+    bool[,,] grid;                                          // Occupancy map; true for any filled cell (room or corridor).
+    bool[,,] isRoom;                                        // Room membership map; true for cells belonging to rooms.
+    HashSet<Vector3Int> doors = new HashSet<Vector3Int>();  // One doorway cell recorded per room.
+    List<Room> rooms = new List<Room>();                    // Placed rooms with cached metadata.
 
-    Transform root;
-    Transform roomRoot;
-    Transform corridorRoot;
-    LineRenderer boundsLR;   // RUNTIME bounds wire (Game view)
+    Transform root;                                         // Parent transform for all generated content.
+    Transform roomRoot;                                     // Parent for room cell instances.
+    Transform corridorRoot;                                 // Parent for corridor cell instances.
+    LineRenderer boundsLR;                                   // Runtime bounds wire drawn in the Game view.
 
     struct Room
     {
-        public BoundsInt bounds;
-        public Vector3Int center;     // integer center (grid)
-        public Vector3Int door;       // single doorway cell on the room perimeter
-        public int index;
+        public BoundsInt bounds;                            // Inclusive-exclusive bounds (grid-space) for the room volume.
+        public Vector3Int center;                           // Integer center of the room (grid-space).
+        public Vector3Int door;                             // Selected doorway cell on the room perimeter.
+        public int index;                                   // Stable index assigned at placement.
     }
 
     void Awake()
     {
-        EnsureRoots();
+        EnsureRoots();                                      // Lazily create/locate container transforms and the bounds wire.
     }
 
     void Start()
     {
-        Generate();
+        Generate();                                         // Build the initial dungeon on startup.
     }
 
     void Update()
     {
-        if (Input.GetKeyDown(selectAxisXKey)) selectedAxis = Axis.X;
-        if (Input.GetKeyDown(selectAxisYKey)) selectedAxis = Axis.Y;
-        if (Input.GetKeyDown(selectAxisZKey)) selectedAxis = Axis.Z;
+        if (Input.GetKeyDown(selectAxisXKey)) selectedAxis = Axis.X;   // Switch selected axis: X.
+        if (Input.GetKeyDown(selectAxisYKey)) selectedAxis = Axis.Y;   // Switch selected axis: Y.
+        if (Input.GetKeyDown(selectAxisZKey)) selectedAxis = Axis.Z;   // Switch selected axis: Z.
 
-        if (Input.GetKeyDown(sizeIncreaseKey)) { BumpAxis(+sizeStep); Generate(); }
-        if (Input.GetKeyDown(sizeDecreaseKey)) { BumpAxis(-sizeStep); Generate(); }
+        if (Input.GetKeyDown(sizeIncreaseKey)) { BumpAxis(+sizeStep); Generate(); } // Grow selected dimension and rebuild.
+        if (Input.GetKeyDown(sizeDecreaseKey)) { BumpAxis(-sizeStep); Generate(); } // Shrink selected dimension and rebuild.
 
-        if (Input.GetKeyDown(regenerateKey)) Generate();
+        if (Input.GetKeyDown(regenerateKey)) Generate();    // Regenerate with current settings.
     }
 
     void BumpAxis(int delta)
     {
         switch (selectedAxis)
         {
-            case Axis.X: config.sizeX = Mathf.Max(1, config.sizeX + delta); break;
-            case Axis.Y: config.sizeY = Mathf.Max(1, config.sizeY + delta); break;
-            case Axis.Z: config.sizeZ = Mathf.Max(1, config.sizeZ + delta); break;
+            case Axis.X: config.sizeX = Mathf.Max(1, config.sizeX + delta); break; // Clamp to at least 1 cell.
+            case Axis.Y: config.sizeY = Mathf.Max(1, config.sizeY + delta); break; // Clamp to at least 1 cell.
+            case Axis.Z: config.sizeZ = Mathf.Max(1, config.sizeZ + delta); break; // Clamp to at least 1 cell.
         }
     }
 
     void EnsureRoots()
     {
+        // Create or reuse a "Generated" root under this component.
         if (root == null)
         {
             var existing = transform.Find("Generated");
             root = existing != null ? existing : new GameObject("Generated").transform;
             root.SetParent(transform, false);
         }
+        // Create or reuse "Rooms" and "Corridors" children to organize spawned geometry.
         if (roomRoot == null)
         {
             var existing = root.Find("Rooms");
@@ -130,7 +132,7 @@ public class VoxelDungeonGenerator : MonoBehaviour
             corridorRoot = existing != null ? existing : new GameObject("Corridors").transform;
             corridorRoot.SetParent(root, false);
         }
-        // Bounds child (LineRenderer)
+        // Create or reuse a LineRenderer to visualize generator bounds at runtime.
         if (boundsLR == null)
         {
             var existing = root.Find("BoundsWire");
@@ -138,78 +140,79 @@ public class VoxelDungeonGenerator : MonoBehaviour
             if (!existing) go.transform.SetParent(root, false);
             boundsLR = go.GetComponent<LineRenderer>();
             if (boundsLR == null) boundsLR = go.AddComponent<LineRenderer>();
-            SetupBoundsLR();
+            SetupBoundsLR();                                // Initialize renderer properties.
         }
     }
 
     void SetupBoundsLR()
     {
-        boundsLR.useWorldSpace = true;
-        boundsLR.loop = false;
-        boundsLR.widthMultiplier = config.boundsLineWidth;
-        boundsLR.material = new Material(Shader.Find("Sprites/Default"));
-        boundsLR.startColor = config.boundsColor;
+        boundsLR.useWorldSpace = true;                      // Positions are authored in world-space.
+        boundsLR.loop = false;                              // Polyline assembled from discrete segments.
+        boundsLR.widthMultiplier = config.boundsLineWidth;  // Width configured by authoring settings.
+        boundsLR.material = new Material(Shader.Find("Sprites/Default")); // Simple unlit material for line rendering.
+        boundsLR.startColor = config.boundsColor;           // Uniform color across the line.
         boundsLR.endColor = config.boundsColor;
-        boundsLR.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+        boundsLR.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off; // Avoids unnecessary overhead.
         boundsLR.receiveShadows = false;
-        boundsLR.enabled = config.drawBounds;
+        boundsLR.enabled = config.drawBounds;               // Respect visibility toggle.
     }
 
     public void Generate()
     {
-        EnsureRoots();
-        ClearChildren(roomRoot);
-        ClearChildren(corridorRoot);
+        EnsureRoots();                                      // Ensure hierarchy exists prior to spawning.
+        ClearChildren(roomRoot);                            // Remove previously generated rooms.
+        ClearChildren(corridorRoot);                        // Remove previously generated corridors.
 
-        rng = new System.Random(config.seed == 0 ? Random.Range(int.MinValue, int.MaxValue) : config.seed);
+        rng = new System.Random(                            // Initialize RNG from fixed or random seed.
+            config.seed == 0 ? Random.Range(int.MinValue, int.MaxValue) : config.seed);
 
-        grid = new bool[config.sizeX, config.sizeY, config.sizeZ];
-        isRoom = new bool[config.sizeX, config.sizeY, config.sizeZ];
-        rooms.Clear();
-        doors.Clear();
+        grid = new bool[config.sizeX, config.sizeY, config.sizeZ]; // Clear occupancy map.
+        isRoom = new bool[config.sizeX, config.sizeY, config.sizeZ]; // Clear room map.
+        rooms.Clear();                                      // Reset room list.
+        doors.Clear();                                      // Reset door registry.
 
-        PlaceRoomsNoOverlap();
-        ChooseOneDoorPerRoom();
-        ConnectRoomsWithCorridors();
-        SpawnGeometry();
-        ColorStartAndEnd();
-        BuildBoundsWire();   // <<< runtime cage for Game view
+        PlaceRoomsNoOverlap();                              // Randomly place disjoint rooms with separation.
+        ChooseOneDoorPerRoom();                             // Pick one perimeter cell to designate as a doorway.
+        ConnectRoomsWithCorridors();                        // Build graph connections and carve corridors.
+        SpawnGeometry();                                    // Instantiate prefabs for occupied cells.
+        ColorStartAndEnd();                                 // Mark two farthest rooms with start/end materials.
+        BuildBoundsWire();                                  // Update runtime bounds wire for visualization.
     }
 
     void PlaceRoomsNoOverlap()
     {
-        int tries = 0;
+        int tries = 0;                                      // Placement attempts performed so far.
         while (rooms.Count < config.roomCount && tries < config.maxPlacementTries)
         {
             tries++;
 
-            int w = RandomRangeInclusive(config.roomSizeRangeXZ.x, config.roomSizeRangeXZ.y);
-            int d = RandomRangeInclusive(config.roomSizeRangeXZ.x, config.roomSizeRangeXZ.y);
-            int h = RandomRangeInclusive(config.minRoomY, config.maxRoomY);
+            int w = RandomRangeInclusive(config.roomSizeRangeXZ.x, config.roomSizeRangeXZ.y); // Random width.
+            int d = RandomRangeInclusive(config.roomSizeRangeXZ.x, config.roomSizeRangeXZ.y); // Random depth.
+            int h = RandomRangeInclusive(config.minRoomY, config.maxRoomY);                   // Random height.
 
-            int gap = config.roomGap;
+            int gap = config.roomGap;                      // Buffer region to keep rooms separated.
             int maxX = Mathf.Max(1, config.sizeX - w - gap);
             int maxY = Mathf.Max(1, config.sizeY - h - gap);
             int maxZ = Mathf.Max(1, config.sizeZ - d - gap);
-            if (maxX <= gap || maxY <= gap || maxZ <= gap) break;
+            if (maxX <= gap || maxY <= gap || maxZ <= gap) break; // Early exit if no valid placement remains.
 
-            int x = rng.Next(gap, maxX);
+            int x = rng.Next(gap, maxX);                   // Random origin within valid range.
             int y = rng.Next(gap, maxY);
             int z = rng.Next(gap, maxZ);
 
-            var b = new BoundsInt(x, y, z, w, h, d);
-            if (OverlapsWithGap(b, gap)) continue;
+            var b = new BoundsInt(x, y, z, w, h, d);       // Candidate room bounds (grid-space).
+            if (OverlapsWithGap(b, gap)) continue;         // Skip if overlapping another room including gap.
 
             var room = new Room
             {
                 bounds = b,
                 center = new Vector3Int(b.x + b.size.x / 2, b.y + b.size.y / 2, b.z + b.size.z / 2),
-                door = Vector3Int.zero,
+                door = Vector3Int.zero,                    // Placeholder; assigned in ChooseOneDoorPerRoom.
                 index = rooms.Count
             };
             rooms.Add(room);
 
-            foreach (var c in Cells(b))
+            foreach (var c in Cells(b))                    // Mark grid occupancy for the placed room.
             {
                 isRoom[c.x, c.y, c.z] = true;
                 grid[c.x, c.y, c.z] = true;
@@ -219,12 +222,13 @@ public class VoxelDungeonGenerator : MonoBehaviour
 
     int RandomRangeInclusive(int a, int b)
     {
-        if (a > b) (a, b) = (b, a);
-        return rng.Next(a, b + 1);
+        if (a > b) (a, b) = (b, a);                        // Normalize bounds if provided out of order.
+        return rng.Next(a, b + 1);                          // System.Random upper bound is exclusive.
     }
 
     bool OverlapsWithGap(BoundsInt candidate, int gap)
     {
+        // Tests candidate against all placed rooms with an expanded AABB that includes the configured gap.
         foreach (var r in rooms)
         {
             var a = candidate;
@@ -236,7 +240,7 @@ public class VoxelDungeonGenerator : MonoBehaviour
                 a.yMin < bMax.y && a.yMax > bMin.y &&
                 a.zMin < bMax.z && a.zMax > bMin.z)
             {
-                return true;
+                return true;                                // Overlap (including buffer) detected.
             }
         }
         return false;
@@ -244,6 +248,7 @@ public class VoxelDungeonGenerator : MonoBehaviour
 
     void ChooseOneDoorPerRoom()
     {
+        // For each room, collect perimeter cells that border non-room space and pick one uniformly at random.
         for (int i = 0; i < rooms.Count; i++)
         {
             var r = rooms[i];
@@ -261,14 +266,14 @@ public class VoxelDungeonGenerator : MonoBehaviour
                 foreach (var n in Neighbors6(c))
                 {
                     if (!InBounds(n)) continue;
-                    if (!isRoom[n.x, n.y, n.z]) { perim.Add(c); break; }
+                    if (!isRoom[n.x, n.y, n.z]) { perim.Add(c); break; } // Perimeter cell adjacent to empty space.
                 }
             }
 
-            Vector3Int door = r.center;
+            Vector3Int door = r.center;                     // Fallback if no perimeter candidate exists.
             if (perim.Count > 0) door = perim[rng.Next(perim.Count)];
 
-            r.door = door;
+            r.door = door;                                  // Persist selection.
             rooms[i] = r;
             doors.Add(door);
         }
@@ -276,8 +281,9 @@ public class VoxelDungeonGenerator : MonoBehaviour
 
     void ConnectRoomsWithCorridors()
     {
-        if (rooms.Count <= 1) return;
+        if (rooms.Count <= 1) return;                       // Nothing to connect.
 
+        // Build candidate edges from K-nearest neighbors based on center-to-center distance.
         var edges = new List<(int a, int b, float w)>();
         for (int i = 0; i < rooms.Count; i++)
         {
@@ -293,23 +299,24 @@ public class VoxelDungeonGenerator : MonoBehaviour
             for (int k = 0; k < take; k++)
             {
                 int j = neigh[k].j;
-                if (i < j) edges.Add((i, j, neigh[k].dist));
+                if (i < j) edges.Add((i, j, neigh[k].dist)); // Keep each undirected edge once.
             }
         }
 
-        edges.Sort((e1, e2) => e1.w.CompareTo(e2.w));
-        var uf = new UnionFind(rooms.Count);
-        var chosen = new List<(int a, int b)>();
+        edges.Sort((e1, e2) => e1.w.CompareTo(e2.w));       // Sort by distance to prefer shorter connections.
+        var uf = new UnionFind(rooms.Count);                // Disjoint-set for Kruskal’s algorithm.
+        var chosen = new List<(int a, int b)>();            // Final edge set to realize as corridors.
 
         foreach (var e in edges)
         {
-            if (uf.Union(e.a, e.b)) chosen.Add((e.a, e.b));
+            if (uf.Union(e.a, e.b)) chosen.Add((e.a, e.b)); // Minimum spanning forest.
         }
         foreach (var e in edges)
         {
-            if (Random.value < config.extraEdgeChance) chosen.Add((e.a, e.b));
+            if (Random.value < config.extraEdgeChance) chosen.Add((e.a, e.b)); // Optional cycles for more loops.
         }
 
+        // For each selected connection, carve a BFS path between door cells, avoiding room interiors.
         foreach (var (a, b) in chosen)
         {
             Vector3Int start = rooms[a].door;
@@ -320,15 +327,16 @@ public class VoxelDungeonGenerator : MonoBehaviour
 
             foreach (var p in path)
             {
-                if (!isRoom[p.x, p.y, p.z]) grid[p.x, p.y, p.z] = true;
+                if (!isRoom[p.x, p.y, p.z]) grid[p.x, p.y, p.z] = true; // Mark corridor cells without overwriting rooms.
             }
         }
     }
 
     List<Vector3Int> BFSPath(Vector3Int start, Vector3Int goal, bool blockRooms)
     {
+        // Standard breadth-first search on a 6-connected grid with optional prohibition of room interiors.
         var q = new Queue<Vector3Int>();
-        var came = new Dictionary<Vector3Int, Vector3Int>();
+        var came = new Dictionary<Vector3Int, Vector3Int>(); // Predecessor map.
         var visited = new HashSet<Vector3Int>();
 
         q.Enqueue(start);
@@ -346,7 +354,7 @@ public class VoxelDungeonGenerator : MonoBehaviour
                 bool walkable = true;
                 if (blockRooms)
                 {
-                    if (isRoom[n.x, n.y, n.z] && !doors.Contains(n)) walkable = false;
+                    if (isRoom[n.x, n.y, n.z] && !doors.Contains(n)) walkable = false; // Enter rooms only via door cells.
                 }
 
                 if (walkable)
@@ -358,14 +366,15 @@ public class VoxelDungeonGenerator : MonoBehaviour
             }
         }
 
-        if (!came.ContainsKey(goal) && start != goal) return null;
+        if (!came.ContainsKey(goal) && start != goal) return null; // Unreachable.
 
+        // Reconstruct path from goal to start (inclusive), then reverse.
         var path = new List<Vector3Int>();
         var t = goal;
         path.Add(t);
         while (t != start)
         {
-            if (!came.ContainsKey(t)) return path;
+            if (!came.ContainsKey(t)) return path;          // Incomplete path when goal equals start or reached early.
             t = came[t];
             path.Add(t);
         }
@@ -375,6 +384,7 @@ public class VoxelDungeonGenerator : MonoBehaviour
 
     void SpawnGeometry()
     {
+        // Spawn room instances and highlight door cells using the entrance material when provided.
         for (int i = 0; i < rooms.Count; i++)
         {
             var r = rooms[i];
@@ -385,14 +395,15 @@ public class VoxelDungeonGenerator : MonoBehaviour
             }
         }
 
+        // Spawn corridor instances for occupied non-room cells (and avoid double-spawning door cells).
         for (int x = 0; x < config.sizeX; x++)
             for (int y = 0; y < config.sizeY; y++)
                 for (int z = 0; z < config.sizeZ; z++)
                 {
                     if (!grid[x, y, z]) continue;
-                    if (isRoom[x, y, z] && !doors.Contains(new Vector3Int(x, y, z))) continue;
+                    if (isRoom[x, y, z] && !doors.Contains(new Vector3Int(x, y, z))) continue; // Skip interior room cells.
 
-                    if (doors.Contains(new Vector3Int(x, y, z)) && isRoom[x, y, z]) continue;
+                    if (doors.Contains(new Vector3Int(x, y, z)) && isRoom[x, y, z]) continue; // Skip doorway already spawned as a room cell.
 
                     var go = Instantiate(config.corridorPrefab, GridToWorld(new Vector3Int(x, y, z)), Quaternion.identity, corridorRoot);
                     if (config.corridorMat != null) ApplyMat(go, config.corridorMat);
@@ -401,6 +412,7 @@ public class VoxelDungeonGenerator : MonoBehaviour
 
     void ColorStartAndEnd()
     {
+        // Identify the pair of rooms with maximum center distance and apply start/end materials.
         if (rooms.Count == 0) return;
         int a = 0, b = 0;
         float best = -1f;
@@ -421,6 +433,7 @@ public class VoxelDungeonGenerator : MonoBehaviour
         var cells = new HashSet<Vector3Int>();
         foreach (var c in Cells(r.bounds)) cells.Add(c);
 
+        // Iterate spawned instances under the room parent and recolor any whose grid position falls within the room.
         foreach (Transform t in parent)
         {
             var g = WorldToGrid(t.position);
@@ -431,11 +444,12 @@ public class VoxelDungeonGenerator : MonoBehaviour
     void ApplyMat(GameObject go, Material m)
     {
         var r = go.GetComponentInChildren<Renderer>();
-        if (r != null) r.sharedMaterial = m;
+        if (r != null) r.sharedMaterial = m;               // Use sharedMaterial for editor-time batching and reduced instantiation.
     }
 
     IEnumerable<Vector3Int> Cells(BoundsInt b)
     {
+        // Iterates all integer positions within the inclusive-exclusive bounds.
         for (int x = b.xMin; x < b.xMax; x++)
             for (int y = b.yMin; y < b.yMax; y++)
                 for (int z = b.zMin; z < b.zMax; z++)
@@ -443,10 +457,11 @@ public class VoxelDungeonGenerator : MonoBehaviour
     }
 
     Vector3 GridToWorld(Vector3Int c)
-        => transform.TransformPoint(new Vector3(c.x * config.cellSize, c.y * config.cellSize, c.z * config.cellSize));
+        => transform.TransformPoint(new Vector3(c.x * config.cellSize, c.y * config.cellSize, c.z * config.cellSize)); // Converts grid cell to world-space.
 
     Vector3Int WorldToGrid(Vector3 w)
     {
+        // Converts a world position to the nearest integer grid coordinate in this generator’s local space.
         var local = transform.InverseTransformPoint(w);
         return new Vector3Int(
             Mathf.RoundToInt(local.x / config.cellSize),
@@ -458,10 +473,11 @@ public class VoxelDungeonGenerator : MonoBehaviour
     bool InBounds(Vector3Int c)
         => c.x >= 0 && c.x < config.sizeX &&
            c.y >= 0 && c.y < config.sizeY &&
-           c.z >= 0 && c.z < config.sizeZ;
+           c.z >= 0 && c.z < config.sizeZ;                 // Tests whether a grid coordinate lies within the active volume.
 
     IEnumerable<Vector3Int> Neighbors6(Vector3Int c)
     {
+        // 6-connected neighbors (axis-aligned adjacency).
         yield return new Vector3Int(c.x + 1, c.y, c.z);
         yield return new Vector3Int(c.x - 1, c.y, c.z);
         yield return new Vector3Int(c.x, c.y + 1, c.z);
@@ -472,6 +488,7 @@ public class VoxelDungeonGenerator : MonoBehaviour
 
     void ClearChildren(Transform t)
     {
+        // Destroys all immediate children under the given parent (editor and play mode).
         for (int i = t.childCount - 1; i >= 0; i--)
             DestroyImmediate(t.GetChild(i).gameObject);
     }
@@ -485,17 +502,17 @@ public class VoxelDungeonGenerator : MonoBehaviour
 
         if (!config.drawBounds)
         {
-            boundsLR.positionCount = 0;
+            boundsLR.positionCount = 0;                     // Hide the line when disabled.
             return;
         }
 
-        // Build a polyline covering all 12 edges (pairs duplicated to avoid unwanted diagonals).
+        // Compute world-space corners for the generator AABB starting at this transform’s origin.
         Vector3 min = transform.position;
         Vector3 max = transform.position + new Vector3(config.sizeX * config.cellSize,
                                                        config.sizeY * config.cellSize,
                                                        config.sizeZ * config.cellSize);
 
-        Vector3[] c = new Vector3[8];
+        Vector3[] c = new Vector3[8];                       // Corner ordering: bottom ring 0..3, top ring 4..7.
         c[0] = new Vector3(min.x, min.y, min.z);
         c[1] = new Vector3(max.x, min.y, min.z);
         c[2] = new Vector3(max.x, min.y, max.z);
@@ -505,6 +522,7 @@ public class VoxelDungeonGenerator : MonoBehaviour
         c[6] = new Vector3(max.x, max.y, max.z);
         c[7] = new Vector3(min.x, max.y, max.z);
 
+        // Assemble a polyline that explicitly draws all 12 edges (duplicate endpoints avoid diagonal connections).
         var pts = new List<Vector3>(24);
         // bottom rectangle
         pts.Add(c[0]); pts.Add(c[1]);
@@ -522,7 +540,7 @@ public class VoxelDungeonGenerator : MonoBehaviour
         pts.Add(c[2]); pts.Add(c[6]);
         pts.Add(c[3]); pts.Add(c[7]);
 
-        boundsLR.positionCount = pts.Count;
+        boundsLR.positionCount = pts.Count;                 // Upload vertex positions to the LineRenderer.
         boundsLR.SetPositions(pts.ToArray());
         boundsLR.widthMultiplier = config.boundsLineWidth;
         boundsLR.startColor = config.boundsColor;
@@ -532,17 +550,17 @@ public class VoxelDungeonGenerator : MonoBehaviour
     // Simple union-find
     class UnionFind
     {
-        int[] p; int[] r;
+        int[] p; int[] r;                                   // Parent and rank arrays.
         public UnionFind(int n) { p = new int[n]; r = new int[n]; for (int i = 0; i < n; i++) { p[i] = i; r[i] = 0; } }
-        int Find(int x) { return p[x] == x ? x : (p[x] = Find(p[x])); }
+        int Find(int x) { return p[x] == x ? x : (p[x] = Find(p[x])); } // Path compression.
         public bool Union(int a, int b)
         {
             a = Find(a); b = Find(b);
-            if (a == b) return false;
+            if (a == b) return false;                       // Already in the same set.
             if (r[a] < r[b]) p[a] = b;
             else if (r[a] > r[b]) p[b] = a;
             else { p[b] = a; r[a]++; }
-            return true;
+            return true;                                    // Merge succeeded.
         }
     }
 }
